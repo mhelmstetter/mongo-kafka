@@ -68,6 +68,7 @@ import org.apache.kafka.connect.source.SourceTaskContext;
 import org.bson.BsonDocument;
 import org.bson.BsonDocumentWrapper;
 import org.bson.BsonTimestamp;
+import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
 
@@ -87,6 +88,7 @@ import com.mongodb.kafka.connect.source.heartbeat.HeartbeatManager;
 import com.mongodb.kafka.connect.source.producer.SchemaAndValueProducer;
 import com.mongodb.kafka.connect.source.statistics.StatisticsManager;
 import com.mongodb.kafka.connect.source.topic.mapping.TopicMapper;
+import com.mongodb.kafka.connect.util.ChangeEventFields;
 import com.mongodb.kafka.connect.util.VisibleForTesting;
 import com.mongodb.kafka.connect.util.jmx.SourceTaskStatistics;
 import com.mongodb.kafka.connect.util.time.InnerOuterTimer;
@@ -213,7 +215,7 @@ final class StartedMongoSourceTask implements AutoCloseable {
     while (batchIterator.hasNext()) {
       BsonDocument changeStreamDocument = batchIterator.next();
       Map<String, String> sourceOffset = new HashMap<>();
-      sourceOffset.put(ID_FIELD, changeStreamDocument.getDocument(ID_FIELD).toJson());
+      sourceOffset.put(ID_FIELD, ChangeEventFields.resumeTokenJson(changeStreamDocument));
       if (isCopying) {
         sourceOffset.put(COPY_KEY, "true");
       }
@@ -264,11 +266,16 @@ final class StartedMongoSourceTask implements AutoCloseable {
           BsonDocument keyDocument;
           if (sourceConfig.getKeyOutputFormat() == MongoSourceConfig.OutputFormat.SCHEMA) {
             keyDocument = changeStreamDocument;
-          } else if (sourceConfig.getBoolean(DOCUMENT_KEY_AS_KEY_CONFIG)
-              && changeStreamDocument.containsKey(DOCUMENT_KEY_FIELD)) {
-            keyDocument = changeStreamDocument.getDocument(DOCUMENT_KEY_FIELD);
           } else {
-            keyDocument = new BsonDocument(ID_FIELD, changeStreamDocument.get(ID_FIELD));
+            // one lookup: each RawBsonDocument access scans the event from the start
+            BsonValue documentKey =
+                sourceConfig.getBoolean(DOCUMENT_KEY_AS_KEY_CONFIG)
+                    ? changeStreamDocument.get(DOCUMENT_KEY_FIELD)
+                    : null;
+            keyDocument =
+                documentKey != null
+                    ? documentKey.asDocument()
+                    : new BsonDocument(ID_FIELD, changeStreamDocument.get(ID_FIELD));
           }
 
           createSourceRecord(
