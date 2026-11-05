@@ -359,6 +359,18 @@ public class MongoSourceConfig extends AbstractConfig {
   private static final long POLL_AWAIT_TIME_MS_DEFAULT = 5000;
   private static final String POLL_AWAIT_TIME_MS_DISPLAY = "Poll await time (ms)";
 
+  public static final String POLL_PREFETCH_BATCHES_CONFIG = "poll.prefetch.batches";
+  private static final String POLL_PREFETCH_BATCHES_DISPLAY = "Prefetched change stream batches";
+  private static final String POLL_PREFETCH_BATCHES_DOC =
+      "The number of change stream batches a dedicated fetcher thread may read ahead of the task "
+          + "while the task converts and hands the previous batch to Kafka Connect. "
+          + "0 disables prefetching: the task reads from the cursor itself, one batch per poll. "
+          + "Prefetching keeps a single cursor read in order, so event ordering and offsets are unchanged. "
+          + "Not used while copying existing data. "
+          + "With prefetching, getMore commands run on the fetcher thread, overlapping in-task-poll: "
+          + "use in-task-poll-fetch-wait and prefetch-queue-full-wait to see which side is the limit.";
+  private static final int POLL_PREFETCH_BATCHES_DEFAULT = 0;
+
   public static final String DATABASE_CONFIG = "database";
   private static final String DATABASE_DISPLAY = "The database to watch.";
   private static final String DATABASE_DOC =
@@ -1158,6 +1170,18 @@ public class MongoSourceConfig extends AbstractConfig {
         ++orderInGroup,
         Width.MEDIUM,
         POLL_AWAIT_TIME_MS_DISPLAY);
+
+    configDef.define(
+        POLL_PREFETCH_BATCHES_CONFIG,
+        Type.INT,
+        POLL_PREFETCH_BATCHES_DEFAULT,
+        ConfigDef.Range.atLeast(0),
+        Importance.LOW,
+        POLL_PREFETCH_BATCHES_DOC,
+        group,
+        ++orderInGroup,
+        Width.MEDIUM,
+        POLL_PREFETCH_BATCHES_DISPLAY);
 
     group = "Topic mapping";
     orderInGroup = 0;

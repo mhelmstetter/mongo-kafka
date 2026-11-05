@@ -178,6 +178,50 @@ public class SourceTaskStatistics extends MongoMBean {
     DESCRIPTIONS.put(
         "getmore-commands-failed-duration-over-10000-ms",
         "The total number of failed getMore commands issued by a MongoDB source task with a duration that exceeded 10000ms.");
+
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait",
+        "The number of times the poll() method of a MongoDB source task reported waiting for change stream data.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-ms",
+        "The total number of milliseconds the poll() method of a MongoDB source task spent waiting for change stream data, whether reading from the cursor or, with poll.prefetch.batches, waiting for the fetcher thread. The time the task spent on its own work is in-task-poll-duration-ms minus this value.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-over-1-ms",
+        "The number of reported waits for change stream data that exceeded 1ms.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-over-10-ms",
+        "The number of reported waits for change stream data that exceeded 10ms.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-over-100-ms",
+        "The number of reported waits for change stream data that exceeded 100ms.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-over-1000-ms",
+        "The number of reported waits for change stream data that exceeded 1000ms.");
+    DESCRIPTIONS.put(
+        "in-task-poll-fetch-wait-duration-over-10000-ms",
+        "The number of reported waits for change stream data that exceeded 10000ms.");
+
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait",
+        "The number of times the fetcher thread of a MongoDB source task reported waiting for space in the prefetch queue.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-ms",
+        "The total number of milliseconds the fetcher thread of a MongoDB source task spent waiting for space in the prefetch queue, because the task had not yet taken the previous batch. Always 0 without poll.prefetch.batches.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-over-1-ms",
+        "The number of reported waits for prefetch queue space that exceeded 1ms.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-over-10-ms",
+        "The number of reported waits for prefetch queue space that exceeded 10ms.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-over-100-ms",
+        "The number of reported waits for prefetch queue space that exceeded 100ms.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-over-1000-ms",
+        "The number of reported waits for prefetch queue space that exceeded 1000ms.");
+    DESCRIPTIONS.put(
+        "prefetch-queue-full-wait-duration-over-10000-ms",
+        "The number of reported waits for prefetch queue space that exceeded 10000ms.");
   }
 
   private final Metric records = registerTotal("records");
@@ -188,6 +232,8 @@ public class SourceTaskStatistics extends MongoMBean {
       registerLatest("latest-mongodb-time-difference-secs");
 
   private final Metric inTaskPoll = registerMs("in-task-poll");
+  private final Metric inTaskPollFetchWait = registerMs("in-task-poll-fetch-wait");
+  private final Metric prefetchQueueFullWait = registerMs("prefetch-queue-full-wait");
   private final Metric inConnectFramework = registerMs("in-connect-framework");
   private final Metric initialCommandsSuccessful = registerMs("initial-commands-successful");
   private final Metric getmoreCommandsSuccessful = registerMs("getmore-commands-successful");
@@ -220,6 +266,14 @@ public class SourceTaskStatistics extends MongoMBean {
 
   public Metric getInTaskPoll() {
     return inTaskPoll;
+  }
+
+  public Metric getInTaskPollFetchWait() {
+    return inTaskPollFetchWait;
+  }
+
+  public Metric getPrefetchQueueFullWait() {
+    return prefetchQueueFullWait;
   }
 
   public Metric getInConnectFramework() {
