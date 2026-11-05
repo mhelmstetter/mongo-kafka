@@ -42,6 +42,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import org.bson.BsonDocument;
 import org.bson.BsonString;
+import org.bson.RawBsonDocument;
 
 import com.mongodb.kafka.connect.source.MongoSourceConfig;
 
@@ -318,6 +319,34 @@ public class DefaultTopicMapperTest {
     DefaultTopicMapper topicMapper = new DefaultTopicMapper();
     topicMapper.configure(config);
     return topicMapper;
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "{\"_id\": {\"_data\": \"82AB\"}, \"fullDocument\": {\"ns\": {\"db\": \"inner\"}},"
+            + " \"ns\": {\"db\": \"myDb\", \"coll\": \"myColl\"}, \"documentKey\": {\"_id\": 1}}",
+        "{\"ns\": {\"db\": \"myDb\"}}",
+        "{\"ns\": {\"coll\": \"myColl\"}}",
+        "{\"ns\": {\"db\": 1, \"coll\": \"myColl\"}}",
+        "{\"ns\": \"notadocument\"}",
+        "{\"a\": 1}",
+        "{\"ns.db\": \"literalDb\", \"ns\": {\"db\": \"myDb\", \"coll\": \"myColl\"}}",
+        "{\"ns\": {\"db\": \"myDb\", \"coll\": \"myColl\"}, \"ns.coll\": \"literalColl\"}",
+      })
+  @DisplayName("raw and parsed change events map to the same topic")
+  void testRawAndParsedEventsMapToTheSameTopic(final String event) {
+    Map<String, String> plain = new HashMap<>();
+    Map<String, String> mapped = new HashMap<>();
+    mapped.put(TOPIC_PREFIX_CONFIG, PREFIX);
+    mapped.put(TOPIC_SUFFIX_CONFIG, SUFFIX);
+    mapped.put(TOPIC_NAMESPACE_MAP_CONFIG, "{'myDb.myColl': 'topicOne', 'myDb': 'topicTwo'}");
+    for (Map<String, String> config : asList(plain, mapped)) {
+      DefaultTopicMapper raw = createMapper(createSourceConfig(config));
+      DefaultTopicMapper parsed = createMapper(createSourceConfig(config));
+      assertEquals(
+          parsed.getTopic(BsonDocument.parse(event)), raw.getTopic(RawBsonDocument.parse(event)));
+    }
   }
 
   private static void createMapper(final String topicNamespaceMap) {
