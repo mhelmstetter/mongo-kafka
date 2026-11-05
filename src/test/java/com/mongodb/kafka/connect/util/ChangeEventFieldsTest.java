@@ -108,6 +108,27 @@ class ChangeEventFieldsTest {
     assertNull(ChangeEventFields.readNamespace(RawBsonDocument.parse(json)));
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "{\"a\": {\"b\": {\"c\": 1}}}",
+        "{\"a.b.c\": \"literal\", \"a\": {\"b\": {\"c\": 1}}}",
+        "{\"a\": {\"b.c\": \"nested literal\", \"b\": {\"c\": 1}}}",
+        "{\"a\": {\"b\": null}}",
+        "{\"a\": null}",
+        "{\"a\": 1}",
+        "{\"a\": {\"b\": 2}}",
+        "{}",
+      })
+  @DisplayName("fieldLookup gives the same result for raw and parsed documents")
+  void fieldLookupMatchesForRawAndParsed(final String json) {
+    for (String path : new String[] {"a", "a.b", "a.b.c", "a.b.", "a.", "x", "a.x", ""}) {
+      assertEquals(
+          fieldLookup(path, BsonDocument.parse(json)),
+          fieldLookup(path, RawBsonDocument.parse(json)));
+    }
+  }
+
   private static String stringAt(final String path, final BsonDocument document) {
     return fieldLookup(path, document)
         .filter(BsonValue::isString)

@@ -25,13 +25,17 @@ public final class BsonDocumentFieldLookup {
 
   public static Optional<BsonValue> fieldLookup(
       final String fieldPath, final BsonDocument document) {
-    if (document.containsKey(fieldPath)) {
-      return Optional.of(document.get(fieldPath));
-    } else if (fieldPath.contains(".") && !fieldPath.endsWith(".")) {
+    // one get per level: each RawBsonDocument access scans the document from the start
+    BsonValue value = document.get(fieldPath);
+    if (value != null) {
+      return Optional.of(value);
+    }
+    if (fieldPath.contains(".") && !fieldPath.endsWith(".")) {
       String subDocumentName = fieldPath.substring(0, fieldPath.indexOf("."));
       String subDocumentFieldName = fieldPath.substring(fieldPath.indexOf(".") + 1);
-      if (document.isDocument(subDocumentName)) {
-        return fieldLookup(subDocumentFieldName, document.getDocument(subDocumentName));
+      BsonValue subDocument = document.get(subDocumentName);
+      if (subDocument != null && subDocument.isDocument()) {
+        return fieldLookup(subDocumentFieldName, subDocument.asDocument());
       }
     }
 
