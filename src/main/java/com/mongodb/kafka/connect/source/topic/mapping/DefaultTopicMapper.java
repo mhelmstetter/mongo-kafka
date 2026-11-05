@@ -42,11 +42,13 @@ import java.util.stream.Stream;
 
 import org.bson.BsonDocument;
 import org.bson.Document;
+import org.bson.RawBsonDocument;
 
 import com.mongodb.annotations.NotThreadSafe;
 import com.mongodb.lang.Nullable;
 
 import com.mongodb.kafka.connect.source.MongoSourceConfig;
+import com.mongodb.kafka.connect.util.ChangeEventFields;
 import com.mongodb.kafka.connect.util.ConnectConfigException;
 
 @NotThreadSafe
@@ -133,11 +135,21 @@ public class DefaultTopicMapper implements TopicMapper {
   @Override
   public String getTopic(final BsonDocument changeStreamDocument) {
 
-    String dbName = getStringFromPath(DB_FIELD_PATH, changeStreamDocument);
+    ChangeEventFields.Namespace eventNamespace =
+        changeStreamDocument instanceof RawBsonDocument
+            ? ChangeEventFields.readNamespace((RawBsonDocument) changeStreamDocument)
+            : null;
+    String dbName =
+        eventNamespace != null
+            ? eventNamespace.getDb()
+            : getStringFromPath(DB_FIELD_PATH, changeStreamDocument);
     if (dbName.isEmpty()) {
       return "";
     }
-    String collName = getStringFromPath(COLL_FIELD_PATH, changeStreamDocument);
+    String collName =
+        eventNamespace != null
+            ? eventNamespace.getColl()
+            : getStringFromPath(COLL_FIELD_PATH, changeStreamDocument);
     String namespace = namespace(dbName, collName);
 
     String cachedTopic = namespaceTopicCache.get(namespace);

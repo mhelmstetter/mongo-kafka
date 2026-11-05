@@ -19,6 +19,7 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
@@ -41,7 +42,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import org.bson.BsonDocument;
+import org.bson.BsonInvalidOperationException;
 import org.bson.BsonTimestamp;
+import org.bson.RawBsonDocument;
 
 import com.mongodb.ServerAddress;
 import com.mongodb.ServerCursor;
@@ -180,6 +183,55 @@ final class StartedMongoSourceTaskTest {
       verify(changeStreamIterable, atLeastOnce()).startAtOperationTime(argCaptor.capture());
       List<BsonTimestamp> capturedArgs = argCaptor.getAllValues();
       assertTrue(capturedArgs.stream().allMatch(v -> v.equals(expected)), capturedArgs::toString);
+    }
+  }
+
+  @Nested
+  final class RecordKeyTest {
+    private StartedMongoSourceTask task;
+
+    @Test
+    void keyIsTheDocumentKeyWhenPresentAndTheResumeTokenOtherwise() {
+      assertEquals(
+          "{\"_id\": 1}", keyOf("{\"_id\": {\"_data\": \"01\"}, \"documentKey\": {\"_id\": 1}}"));
+      assertEquals(
+          "{\"_id\": {\"_data\": \"01\"}}", keyOf("{\"_id\": {\"_data\": \"01\"}, \"a\": 1}"));
+      assertThrows(
+          BsonInvalidOperationException.class,
+          () -> keyOf("{\"_id\": {\"_data\": \"01\"}, \"documentKey\": 1}"));
+    }
+
+    private Object keyOf(final String event) {
+      Map<String, String> properties = new HashMap<>();
+      properties.put(MongoSourceConfig.TOPIC_PREFIX_CONFIG, "t");
+      MongoSourceConfig cfg = new MongoSourceConfig(properties);
+      SourceTaskContext context = mock(SourceTaskContext.class);
+      OffsetStorageReader offsetStorageReader = mock(OffsetStorageReader.class);
+      when(offsetStorageReader.offset(any())).thenReturn(emptyMap());
+      when(context.offsetStorageReader()).thenReturn(offsetStorageReader);
+      MongoChangeStreamCursor<BsonDocument> cursor = cast(mock(MongoChangeStreamCursor.class));
+      when(cursor.getServerCursor()).thenReturn(new ServerCursor(1L, new ServerAddress()));
+      BsonDocument raw =
+          RawBsonDocument.parse(
+              event.substring(0, event.length() - 1)
+                  + ", \"ns\": {\"db\": \"d\", \"coll\": \"c\"}}");
+      when(cursor.tryNext()).thenReturn(raw);
+      ChangeStreamIterable<?> changeStreamIterable = cast(mock(ChangeStreamIterable.class));
+      MongoClient client = mock(MongoClient.class);
+      when(changeStreamIterable.withDocumentClass(any())).thenReturn(cast(changeStreamIterable));
+      when(changeStreamIterable.cursor()).thenReturn(cast(cursor));
+      when(client.watch()).thenReturn(cast(changeStreamIterable));
+      task =
+          new StartedMongoSourceTask(
+              () -> context, cfg, client, null, new JmxStatisticsManager(false, "unknown"));
+      try {
+        List<SourceRecord> records = task.poll();
+        assertEquals(1, records.size());
+        return records.get(0).key();
+      } finally {
+        task.close();
+        task = null;
+      }
     }
   }
 
