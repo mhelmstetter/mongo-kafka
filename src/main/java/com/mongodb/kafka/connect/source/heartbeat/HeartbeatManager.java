@@ -21,6 +21,7 @@ import static com.mongodb.kafka.connect.source.MongoSourceTask.ID_FIELD;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.connect.data.Schema;
@@ -36,7 +37,7 @@ public class HeartbeatManager {
   private static final Logger LOGGER = LoggerFactory.getLogger(HeartbeatManager.class);
   public static final String HEARTBEAT_KEY = "HEARTBEAT";
   private final Time time;
-  private final MongoChangeStreamCursor<? extends BsonDocument> cursor;
+  private final Supplier<BsonDocument> resumeTokenSupplier;
   private final String heartbeatTopicName;
   private final long heartbeatIntervalMS;
   private final Map<String, Object> partitionMap;
@@ -50,15 +51,33 @@ public class HeartbeatManager {
       final long heartbeatIntervalMS,
       final String heartbeatTopicName,
       final Map<String, Object> partitionMap) {
+    this(
+        time,
+        cursor == null ? null : cursor::getResumeToken,
+        heartbeatIntervalMS,
+        heartbeatTopicName,
+        partitionMap);
+  }
+
+  /**
+   * @param resumeTokenSupplier supplies the resume token up to which every change stream event has
+   *     already been returned to Kafka Connect; {@code null} when there is no cursor.
+   */
+  public HeartbeatManager(
+      final Time time,
+      final Supplier<BsonDocument> resumeTokenSupplier,
+      final long heartbeatIntervalMS,
+      final String heartbeatTopicName,
+      final Map<String, Object> partitionMap) {
     this.time = time;
-    this.cursor = cursor;
+    this.resumeTokenSupplier = resumeTokenSupplier;
     this.heartbeatIntervalMS = heartbeatIntervalMS;
     this.heartbeatTopicName = heartbeatTopicName;
     this.partitionMap = partitionMap;
   }
 
   public Optional<SourceRecord> heartbeat() {
-    if (cursor == null) {
+    if (resumeTokenSupplier == null) {
       LOGGER.debug("Returning no heartbeat: null cursor");
       return Optional.empty();
     }
@@ -74,7 +93,7 @@ public class HeartbeatManager {
       return Optional.empty();
     }
     lastHeartbeatMS = currentMS;
-    BsonDocument resumeTokenBson = cursor.getResumeToken();
+    BsonDocument resumeTokenBson = resumeTokenSupplier.get();
     if (resumeTokenBson == null) {
       LOGGER.debug("Returning no heartbeat: cursor resumeToken is null");
       return Optional.empty();

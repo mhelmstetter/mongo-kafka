@@ -17,11 +17,13 @@ package com.mongodb.kafka.connect.source;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -29,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTaskContext;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
 import org.junit.jupiter.api.AfterEach;
@@ -37,8 +40,11 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 
+import com.mongodb.ServerAddress;
+import com.mongodb.ServerCursor;
 import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
@@ -48,6 +54,64 @@ import com.mongodb.kafka.connect.source.MongoSourceConfig.StartupConfig.StartupM
 import com.mongodb.kafka.connect.source.statistics.JmxStatisticsManager;
 
 final class StartedMongoSourceTaskTest {
+  @Nested
+  final class PrefetchHeartbeatTest {
+    private StartedMongoSourceTask task;
+
+    @AfterEach
+    void tearDown() {
+      if (task != null) {
+        task.close();
+      }
+    }
+
+    @Test
+    void heartbeatUsesTheLastReturnedBatchNotTheCursorPosition() throws Exception {
+      Map<String, String> properties = new HashMap<>();
+      properties.put(MongoSourceConfig.POLL_PREFETCH_BATCHES_CONFIG, "1");
+      properties.put(MongoSourceConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "1");
+      properties.put(MongoSourceConfig.HEARTBEAT_TOPIC_NAME_CONFIG, "hb");
+      MongoSourceConfig cfg = new MongoSourceConfig(properties);
+      SourceTaskContext context = mock(SourceTaskContext.class);
+      OffsetStorageReader offsetStorageReader = mock(OffsetStorageReader.class);
+      when(offsetStorageReader.offset(any())).thenReturn(emptyMap());
+      when(context.offsetStorageReader()).thenReturn(offsetStorageReader);
+      BsonDocument returned = BsonDocument.parse("{\"_data\": \"01\"}");
+      BsonDocument ahead = BsonDocument.parse("{\"_data\": \"02\"}");
+      MongoChangeStreamCursor<BsonDocument> cursor = cast(mock(MongoChangeStreamCursor.class));
+      when(cursor.getServerCursor()).thenReturn(new ServerCursor(1L, new ServerAddress()));
+      when(cursor.tryNext()).thenReturn(null);
+      when(cursor.getResumeToken()).thenReturn(returned, ahead);
+      ChangeStreamIterable<?> changeStreamIterable = cast(mock(ChangeStreamIterable.class));
+      MongoClient client = mock(MongoClient.class);
+      when(changeStreamIterable.withDocumentClass(any())).thenReturn(cast(changeStreamIterable));
+      when(changeStreamIterable.cursor()).thenReturn(cast(cursor));
+      when(client.watch()).thenReturn(cast(changeStreamIterable));
+      task =
+          new StartedMongoSourceTask(
+              () -> context, cfg, client, null, new JmxStatisticsManager(false, "unknown"));
+      // the fetcher has read a second batch, so the cursor is ahead of anything returned
+      verify(cursor, timeout(5000).atLeast(2)).getResumeToken();
+
+      assertEquals(returned.toJson(), nextHeartbeatToken());
+      assertEquals(ahead.toJson(), nextHeartbeatToken());
+    }
+
+    private String nextHeartbeatToken() throws InterruptedException {
+      long deadline = System.currentTimeMillis() + 5000;
+      while (System.currentTimeMillis() < deadline) {
+        Thread.sleep(2); // past the heartbeat interval
+        List<SourceRecord> records = task.poll();
+        if (records != null) {
+          assertEquals(1, records.size());
+          assertEquals("hb", records.get(0).topic());
+          return (String) records.get(0).sourceOffset().get("_id");
+        }
+      }
+      throw new AssertionError("no heartbeat within 5 s");
+    }
+  }
+
   @Nested
   final class ChangeStreamIterableOptionsTest {
     private final Map<String, String> properties = new HashMap<>();

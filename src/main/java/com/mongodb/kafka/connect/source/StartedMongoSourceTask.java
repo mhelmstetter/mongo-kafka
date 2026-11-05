@@ -25,6 +25,7 @@ import static com.mongodb.kafka.connect.source.MongoSourceConfig.HEARTBEAT_INTER
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.HEARTBEAT_TOPIC_NAME_CONFIG;
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.POLL_AWAIT_TIME_MS_CONFIG;
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.POLL_MAX_BATCH_SIZE_CONFIG;
+import static com.mongodb.kafka.connect.source.MongoSourceConfig.POLL_PREFETCH_BATCHES_CONFIG;
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.PUBLISH_FULL_DOCUMENT_ONLY_CONFIG;
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.PUBLISH_FULL_DOCUMENT_ONLY_TOMBSTONE_ON_DELETE_CONFIG;
 import static com.mongodb.kafka.connect.source.MongoSourceConfig.StartupConfig.StartupMode.COPY_EXISTING;
@@ -91,9 +92,11 @@ import com.mongodb.kafka.connect.util.VisibleForTesting;
 import com.mongodb.kafka.connect.util.jmx.SourceTaskStatistics;
 import com.mongodb.kafka.connect.util.time.InnerOuterTimer;
 import com.mongodb.kafka.connect.util.time.InnerOuterTimer.InnerTimer;
+import com.mongodb.kafka.connect.util.time.MillisAccumulator;
 
 final class StartedMongoSourceTask implements AutoCloseable {
   private static final String FULL_DOCUMENT = "fullDocument";
+  private static final long PREFETCH_POLL_TIMEOUT_MS = 500;
   private static final int NAMESPACE_NOT_FOUND_ERROR = 26;
   private static final int ILLEGAL_OPERATION_ERROR = 20;
   private static final int UNKNOWN_FIELD_ERROR = 40415;
@@ -135,7 +138,12 @@ final class StartedMongoSourceTask implements AutoCloseable {
   private BsonDocument cachedResumeToken;
 
   @Nullable private MongoChangeStreamCursor<? extends BsonDocument> cursor;
+  @Nullable private volatile ChangeStreamPrefetcher prefetcher;
+  /** With prefetching: the resume token after the last batch returned by getNextBatch. */
+  @Nullable private BsonDocument lastReturnedResumeToken;
+
   private final StatisticsManager statisticsManager;
+  private final MillisAccumulator fetchWait;
   private final InnerOuterTimer inTaskPollInConnectFrameworkTimer;
 
   StartedMongoSourceTask(
@@ -156,12 +164,16 @@ final class StartedMongoSourceTask implements AutoCloseable {
     time = Time.SYSTEM;
     partitionMap = createPartitionMap(sourceConfig);
     this.copyDataManager = copyDataManager;
+    this.statisticsManager = statisticsManager;
+    fetchWait =
+        new MillisAccumulator(
+            millis ->
+                statisticsManager.currentStatistics().getInTaskPollFetchWait().sample(millis));
     if (shouldCopyData) {
       setCachedResultAndResumeToken();
     } else {
       initializeCursorAndHeartbeatManager();
     }
-    this.statisticsManager = statisticsManager;
     inTaskPollInConnectFrameworkTimer =
         InnerOuterTimer.start(
             (inTaskPollSample) -> {
@@ -355,6 +367,14 @@ final class StartedMongoSourceTask implements AutoCloseable {
   public void close() {
     LOGGER.info("Stopping MongoDB source task");
     isRunning = false;
+    ChangeStreamPrefetcher runningPrefetcher = prefetcher;
+    if (runningPrefetcher != null) {
+      // Don't wait: the fetcher can be in a getMore for up to poll.await.time.ms and Kafka Connect
+      // limits how long a task may take to stop. The fetcher owns the cursor and closes it on exit.
+      runningPrefetcher.stop();
+      prefetcher = null;
+      cursor = null;
+    }
 
     //noinspection EmptyTryBlock
     try (StatisticsManager ignored3 = this.statisticsManager;
@@ -367,13 +387,53 @@ final class StartedMongoSourceTask implements AutoCloseable {
 
   private void initializeCursorAndHeartbeatManager() {
     cursor = createCursor(sourceConfig, mongoClient);
-    heartbeatManager =
-        new HeartbeatManager(
-            time,
-            cursor,
-            sourceConfig.getLong(HEARTBEAT_INTERVAL_MS_CONFIG),
-            sourceConfig.getString(HEARTBEAT_TOPIC_NAME_CONFIG),
-            partitionMap);
+    startPrefetcherIfEnabled();
+    if (prefetchEnabled()) {
+      // the cursor is ahead of what has been returned; heartbeat only up to the returned batches
+      Supplier<BsonDocument> returnedResumeToken =
+          cursor == null ? null : () -> lastReturnedResumeToken;
+      heartbeatManager =
+          new HeartbeatManager(
+              time,
+              returnedResumeToken,
+              sourceConfig.getLong(HEARTBEAT_INTERVAL_MS_CONFIG),
+              sourceConfig.getString(HEARTBEAT_TOPIC_NAME_CONFIG),
+              partitionMap);
+    } else {
+      heartbeatManager =
+          new HeartbeatManager(
+              time,
+              cursor,
+              sourceConfig.getLong(HEARTBEAT_INTERVAL_MS_CONFIG),
+              sourceConfig.getString(HEARTBEAT_TOPIC_NAME_CONFIG),
+              partitionMap);
+    }
+  }
+
+  private boolean prefetchEnabled() {
+    return sourceConfig.getInt(POLL_PREFETCH_BATCHES_CONFIG) > 0;
+  }
+
+  private void startPrefetcherIfEnabled() {
+    lastReturnedResumeToken = null;
+    if (cursor != null && prefetchEnabled()) {
+      prefetcher =
+          new ChangeStreamPrefetcher(
+              cursor,
+              sourceConfig.getInt(POLL_PREFETCH_BATCHES_CONFIG),
+              sourceConfig.getInt(POLL_MAX_BATCH_SIZE_CONFIG),
+              sourceConfig.getLong(POLL_AWAIT_TIME_MS_CONFIG),
+              millis ->
+                  statisticsManager.currentStatistics().getPrefetchQueueFullWait().sample(millis),
+              "mongo-source-prefetch-" + Thread.currentThread().getName());
+    }
+  }
+
+  private void closePrefetcher() {
+    if (prefetcher != null) {
+      prefetcher.close();
+      prefetcher = null;
+    }
   }
 
   @VisibleForTesting(otherwise = VisibleForTesting.AccessModifier.PRIVATE)
@@ -558,6 +618,9 @@ final class StartedMongoSourceTask implements AutoCloseable {
    */
   private List<BsonDocument> getNextBatch() {
     List<BsonDocument> batch = new ArrayList<>();
+    if (!isRunning) {
+      return batch;
+    }
 
     long maxBatchSize = sourceConfig.getInt(POLL_MAX_BATCH_SIZE_CONFIG);
     if (isCopying) {
@@ -582,7 +645,7 @@ final class StartedMongoSourceTask implements AutoCloseable {
 
     if (cursor == null) {
       initializeCursorAndHeartbeatManager();
-    } else if (cursor.getServerCursor() == null) {
+    } else if (prefetcher == null && cursor.getServerCursor() == null) {
       LOGGER.info("Cursor has been closed by the server - reinitializing");
       invalidateCursorAndReinitialize();
     }
@@ -592,6 +655,12 @@ final class StartedMongoSourceTask implements AutoCloseable {
       return batch;
     }
 
+    ChangeStreamPrefetcher activePrefetcher = prefetcher;
+    if (activePrefetcher != null) {
+      return nextPrefetchedBatch(activePrefetcher, batch);
+    }
+
+    long fetchStart = System.nanoTime();
     try {
       BsonDocument next;
       do {
@@ -600,34 +669,75 @@ final class StartedMongoSourceTask implements AutoCloseable {
           batch.add(next);
         }
       } while (next != null && batch.size() < maxBatchSize && cursor.available() > 0);
-    } catch (MongoException e) {
-      closeCursor();
-      if (isRunning) {
-        if (sourceConfig.tolerateErrors()) {
-          if (changeStreamNotValid(e)) {
-            cursor = tryRecreateCursor(e);
-          } else {
-            LOGGER.error(
-                "An exception occurred when trying to get the next item from the Change Stream", e);
-          }
-        } else {
-          throw new ConnectException(
-              "An exception occurred when trying to get the next item from the Change Stream: "
-                  + e.getMessage(),
-              e);
-        }
-      }
     } catch (Exception e) {
-      closeCursor();
-      if (isRunning) {
-        throw new ConnectException("Unexpected error: " + e.getMessage(), e);
-      }
+      handleCursorException(e);
+    } finally {
+      fetchWait.add(System.nanoTime() - fetchStart);
     }
 
     return batch;
   }
 
+  private List<BsonDocument> nextPrefetchedBatch(
+      final ChangeStreamPrefetcher activePrefetcher, final List<BsonDocument> batch) {
+    ChangeStreamPrefetcher.FetchedBatch fetched;
+    long fetchStart = System.nanoTime();
+    try {
+      // a short wait so that poll() returns promptly when the task is stopped
+      fetched =
+          activePrefetcher.poll(
+              Math.min(sourceConfig.getLong(POLL_AWAIT_TIME_MS_CONFIG), PREFETCH_POLL_TIMEOUT_MS));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return batch;
+    } finally {
+      fetchWait.add(System.nanoTime() - fetchStart);
+    }
+    if (fetched == null) {
+      return batch;
+    }
+    if (fetched.isCursorClosedByServer()) {
+      LOGGER.info("Cursor has been closed by the server - reinitializing");
+      invalidateCursorAndReinitialize();
+      return batch;
+    }
+    RuntimeException error = fetched.getError();
+    if (error != null) {
+      handleCursorException(error);
+      return batch;
+    }
+    batch.addAll(fetched.getDocuments());
+    lastReturnedResumeToken = fetched.getResumeToken();
+    return batch;
+  }
+
+  private void handleCursorException(final Exception e) {
+    closeCursor();
+    if (!isRunning) {
+      return;
+    }
+    if (e instanceof MongoException) {
+      if (sourceConfig.tolerateErrors()) {
+        if (changeStreamNotValid((MongoException) e)) {
+          cursor = tryRecreateCursor((MongoException) e);
+          startPrefetcherIfEnabled();
+        } else {
+          LOGGER.error(
+              "An exception occurred when trying to get the next item from the Change Stream", e);
+        }
+      } else {
+        throw new ConnectException(
+            "An exception occurred when trying to get the next item from the Change Stream: "
+                + e.getMessage(),
+            e);
+      }
+    } else {
+      throw new ConnectException("Unexpected error: " + e.getMessage(), e);
+    }
+  }
+
   private void closeCursor() {
+    closePrefetcher();
     if (cursor != null) {
       try {
         cursor.close();
@@ -640,6 +750,7 @@ final class StartedMongoSourceTask implements AutoCloseable {
 
   private void invalidateCursorAndReinitialize() {
     invalidatedCursor = true;
+    closePrefetcher();
     if (cursor != null) {
       cursor.close();
       cursor = null;
