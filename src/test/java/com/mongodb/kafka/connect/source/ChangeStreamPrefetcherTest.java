@@ -119,6 +119,28 @@ class ChangeStreamPrefetcherTest {
   }
 
   @Test
+  @DisplayName(
+      "events buffered on a cursor the server already closed are delivered before the close")
+  void bufferedEventsOnAClosedCursorAreDelivered() throws Exception {
+    MongoChangeStreamCursor<BsonDocument> cursor = openCursor();
+    when(cursor.getServerCursor()).thenReturn(null);
+    when(cursor.available()).thenReturn(2, 1, 0);
+    when(cursor.tryNext()).thenReturn(doc(1), doc(2));
+    try (ChangeStreamPrefetcher prefetcher = start(cursor, 2, 10)) {
+      ChangeStreamPrefetcher.FetchedBatch batch = prefetcher.poll(WAIT_MS);
+      assertNotNull(batch);
+      assertFalse(batch.isCursorClosedByServer());
+      assertEquals(2, batch.getDocuments().size());
+      assertEquals(doc(1), batch.getDocuments().get(0));
+      assertEquals(doc(2), batch.getDocuments().get(1));
+
+      ChangeStreamPrefetcher.FetchedBatch closed = prefetcher.poll(WAIT_MS);
+      assertNotNull(closed);
+      assertTrue(closed.isCursorClosedByServer());
+    }
+  }
+
+  @Test
   @DisplayName("stop does not wait for a blocked getMore; the fetcher closes the cursor afterwards")
   void stopDoesNotWaitForBlockedGetMore() throws Exception {
     MongoChangeStreamCursor<BsonDocument> cursor = openCursor();

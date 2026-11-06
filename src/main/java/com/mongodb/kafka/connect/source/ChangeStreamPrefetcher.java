@@ -133,7 +133,10 @@ final class ChangeStreamPrefetcher implements AutoCloseable {
   private void run() {
     try {
       while (running) {
-        if (cursor.getServerCursor() == null) {
+        // the server can close the cursor while its last events are still buffered here, for
+        // example
+        // when an invalidate is in the first batch: deliver those before reporting the close
+        if (cursor.getServerCursor() == null && cursor.available() == 0) {
           enqueue(new FetchedBatch(Collections.emptyList(), null, null, true));
           return;
         }
